@@ -1,0 +1,58 @@
+from pyspark import SparkContext, SparkConf
+import sys
+from itertools import combinations
+
+class Project2:
+
+    def line_process(self, line):
+        fields = line.split(',')
+        invoice_date = fields[3]
+        month_year = invoice_date.split('/')[1] + '/' + invoice_date.split('/')[-1].split(' ')[0]
+        return (fields[0], month_year, fields[1])
+
+
+    def generating_combinations(self, items):
+        return [tuple(sorted(comb)) for comb in combinations(items, 3)]
+
+
+    def decimals(self, num):
+        str_num = format(num, '.15f')
+        integral, decimal = str_num.split('.')
+        if all(d == '0' for d in decimal):
+            return integral + '.0'
+        decimal = decimal.rstrip('0')
+        return integral + '.' + decimal
+
+    def run(self, inputPath, outputPath, k):
+        conf = SparkConf().setAppName("project2_rdd").setMaster("local")
+        sc = SparkContext(conf=conf)
+
+        rdd = sc.textFile(inputPath)
+        processed_data = rdd.map(self.line_process)
+        transactions = processed_data.map(lambda x: ((x[0], x[1]), [x[2]])).reduceByKey(lambda a, b: a + b)
+        combinations = transactions.flatMap(lambda x: [(x[0][1], item) for item in self.generating_combinations(x[1])])
+        monthly_sets = combinations.map(lambda x: (x, 1)).reduceByKey(lambda a, b: a + b)
+        total_transactions_per_month = processed_data.map(lambda x: (x[1], x[0])).distinct().countByKey()
+        support = monthly_sets.map(lambda x: (x[0], x[1] / total_transactions_per_month[x[0][0]]))
+
+        def sorting_function(tuples):
+            return sorted(tuples, key=lambda y: (-y[1], y[0]))[:int(k)]
+
+        sorted_support = support.map(lambda x: (x[0][0], (x[0][1], x[1]))).groupByKey().mapValues(sorting_function).flatMap(lambda x: [(x[0], item[0], item[1]) for item in x[1]])
+
+        sorted_support = sorted_support.sortBy(lambda x: (int(x[0].split('/')[1]), int(x[0].split('/')[0]), -x[2], tuple(sorted(x[1]))))
+
+        formatted_output = sorted_support.map(lambda x: x[0] + ',' + '(' + '|'.join(x[1]) + ')' + ',' + self.decimals(x[2]))
+
+        formatted_output.coalesce(1).saveAsTextFile(outputPath)
+
+        for row in formatted_output.collect():
+            print(row)
+
+        sc.stop()
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Wrong arguments")
+        sys.exit(-1)
+    Project2().run(sys.argv[1], sys.argv[2], sys.argv[3])
