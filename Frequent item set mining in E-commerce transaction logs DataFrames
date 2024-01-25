@@ -1,0 +1,56 @@
+from pyspark.sql.session import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
+from itertools import combinations
+from pyspark.sql.window import Window
+import sys
+
+def generating_combinations(items):
+    return [list(sorted(comb)) for comb in combinations(items, 3)]
+
+comb_udf = udf(generating_combinations, ArrayType(ArrayType(StringType())))
+
+def decimals(num):
+    str_num = format(float(num), '.15f')
+    return str_num.rstrip('0').rstrip('.')
+
+class Project2:
+    def run(self, inputPath, outputPath, k):
+        spark = SparkSession.builder.master("local").appName("project2_df").getOrCreate()
+        spark.conf.set("spark.sql.legacy.timeParserPolicy", "LEGACY")
+
+        data = spark.read.csv(inputPath, header=False)
+        data = data.withColumn("MonthYear", concat(lpad(split(col("_c3"), "/")[1], 2, '0'), lit("/"), split(split(col("_c3"), "/")[2], " ")[0]))
+
+        transactions = data.groupBy(col("_c0"), col("MonthYear")).agg(sort_array(collect_list(data.columns[1])).alias("Items"))
+        combinations = transactions.select("MonthYear", explode(comb_udf(col("Items"))).alias("ItemSet"))
+        monthly_sets = combinations.groupBy("MonthYear", "ItemSet").count()
+
+        total_transactions_per_month = data.groupBy(col("MonthYear")).agg(countDistinct(data.columns[0]).alias("TotalTransactions"))
+        result_df = monthly_sets.join(total_transactions_per_month, "MonthYear").withColumn("Support", col("count") / col("TotalTransactions"))
+
+        formatted_df = result_df.withColumn("FormattedItemSet", concat(lit("("), concat_ws("|", "ItemSet"), lit(")")))
+
+        windowSpec = Window.partitionBy("MonthYear").orderBy(col("Support").desc(), "ItemSet")
+        top_k_df = formatted_df.withColumn("rank", row_number().over(windowSpec)).filter(col("rank") <= k)
+
+        output_df = top_k_df.select(
+            "MonthYear",
+            "FormattedItemSet",
+            col("Support").cast("double").alias("Support")
+        )
+
+        output_df = output_df.withColumn("Year", split(col("MonthYear"), "/")[1]).withColumn("Month", split(col("MonthYear"), "/")[0])
+
+        output_df = output_df.orderBy("Year", "Month", output_df["Support"].desc(), "FormattedItemSet")
+
+        for row in output_df.collect():
+            print(row['MonthYear'] + ',' + row['FormattedItemSet'] + ',' + decimals(row['Support']))
+
+        spark.stop()
+
+if __name__ == "__main__":
+    if len(sys.argv) != 4:
+        print("Wrong arguments")
+        sys.exit(-1)
+    Project2().run(sys.argv[1], sys.argv[2], int(sys.argv[3]))
